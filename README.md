@@ -1,36 +1,43 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Allofinal Inventory Reservations
 
-## Getting Started
+Production-grade Next.js 15 App Router service for inventory lookup and stock reservations.
 
-First, run the development server:
+## Commands
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run build
+npm run lint
+npm run typecheck
+npm run prisma:migrate
+npm run prisma:seed
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Reservation Expiry Cleanup
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Reservations hold stock by incrementing `Inventory.reservedStock`. A reservation is available until `expiresAt`; once expired, it must release that held quantity exactly once.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+This app uses the best practical Vercel approach:
 
-## Learn More
+- `vercel.json` schedules `/api/cron/expire-reservations` every 5 minutes.
+- The cron route calls `cleanupExpiredReservations`.
+- Cleanup selects pending expired rows with `SELECT ... FOR UPDATE SKIP LOCKED`.
+- Each selected row is marked `EXPIRED` and its quantity is decremented from `reservedStock` in the same transaction.
+- `SKIP LOCKED` makes the cleanup horizontally scalable: overlapping cron invocations or future workers skip rows already being processed.
+- Confirm/release flows also perform lazy expiry for the reservation they touch, so stale holds are cleaned even between cron runs.
 
-To learn more about Next.js, take a look at the following resources:
+Set `CRON_SECRET` in production. Vercel should call the cron endpoint with:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```http
+Authorization: Bearer <CRON_SECRET>
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Without `CRON_SECRET`, the cron route only allows unauthenticated access outside production.
 
-## Deploy on Vercel
+## Stock Formula
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```txt
+availableStock = totalStock - reservedStock
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Confirming a reservation decrements both `totalStock` and `reservedStock`. Releasing or expiring a reservation decrements only `reservedStock`.

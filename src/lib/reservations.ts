@@ -54,6 +54,12 @@ type LockedReservationRow = {
   expiresAt: Date | null;
 };
 
+type ExpiredReservationRow = {
+  id: string;
+  inventoryId: string;
+  quantity: number;
+};
+
 type LockedInventoryRow = {
   id: string;
   totalStock: number;
@@ -241,6 +247,78 @@ async function expirePendingReservation(
       data: { status: ReservationStatus.EXPIRED },
     });
   }
+}
+
+export type CleanupExpiredReservationsResult = {
+  scanned: number;
+  expired: number;
+  releasedStock: number;
+};
+
+export async function cleanupExpiredReservations(batchSize = 100) {
+  const startedAt = Date.now();
+
+  const result = await prisma.$transaction(
+    async (tx) => {
+      /*
+       * Vercel cron can invoke this route on a schedule, while normal API
+       * traffic may also touch reservations. SKIP LOCKED makes the cleanup
+       * horizontally safe: if another worker already locked an expired
+       * reservation, this batch skips it instead of waiting or double-releasing
+       * stock. Every selected reservation is locked before inventory is changed.
+       */
+      const expiredReservations = await tx.$queryRaw<ExpiredReservationRow[]>(
+        Prisma.sql`
+          SELECT id, "inventoryId", quantity
+          FROM "Reservation"
+          WHERE status = ${ReservationStatus.PENDING}::"ReservationStatus"
+            AND "expiresAt" IS NOT NULL
+            AND "expiresAt" <= NOW()
+          ORDER BY "expiresAt" ASC
+          LIMIT ${batchSize}
+          FOR UPDATE SKIP LOCKED
+        `,
+      );
+
+      let releasedStock = 0;
+
+      for (const reservation of expiredReservations) {
+        await tx.inventory.update({
+          where: { id: reservation.inventoryId },
+          data: {
+            reservedStock: {
+              decrement: reservation.quantity,
+            },
+          },
+        });
+
+        await tx.reservation.update({
+          where: { id: reservation.id },
+          data: { status: ReservationStatus.EXPIRED },
+        });
+
+        releasedStock += reservation.quantity;
+      }
+
+      return {
+        scanned: expiredReservations.length,
+        expired: expiredReservations.length,
+        releasedStock,
+      };
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      maxWait: 5000,
+      timeout: 20000,
+    },
+  );
+
+  console.info("reservation-expiry-cleanup", {
+    ...result,
+    durationMs: Date.now() - startedAt,
+  });
+
+  return result;
 }
 
 export async function confirmReservation(reservationId: string) {

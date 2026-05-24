@@ -7,6 +7,7 @@ type ApiErrorCode =
   | "GONE"
   | "INTERNAL_SERVER_ERROR"
   | "NOT_FOUND"
+  | "UNAUTHORIZED"
   | "VALIDATION_ERROR";
 
 type ApiSuccess<TData, TMeta = Record<string, never>> = {
@@ -67,6 +68,10 @@ export function gone(message: string, details?: unknown) {
 
 export function notFound(message: string, details?: unknown) {
   return fail("NOT_FOUND", message, 404, details);
+}
+
+export function unauthorized(message = "Unauthorized.") {
+  return fail("UNAUTHORIZED", message, 401);
 }
 
 export function serverError(error: unknown) {
