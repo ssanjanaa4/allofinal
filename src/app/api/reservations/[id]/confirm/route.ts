@@ -8,6 +8,7 @@ import {
   serverError,
   validationError,
 } from "@/lib/api/responses";
+import { withIdempotency } from "@/lib/api/idempotency";
 import {
   confirmReservation,
   ReservationExpiredError,
@@ -29,6 +30,10 @@ type RouteContext = {
 };
 
 export async function POST(_request: Request, context: RouteContext) {
+  return withIdempotency(_request, () => confirmReservationResponse(context));
+}
+
+async function confirmReservationResponse(context: RouteContext) {
   try {
     const { id } = paramsSchema.parse(await context.params);
     const reservation = await confirmReservation(id);

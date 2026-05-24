@@ -49,6 +49,10 @@ export function fail(
   return NextResponse.json(body, { status });
 }
 
+export function badRequest(message: string, details?: unknown) {
+  return fail("BAD_REQUEST", message, 400, details);
+}
+
 export function validationError(error: ZodError) {
   return fail(
     "VALIDATION_ERROR",

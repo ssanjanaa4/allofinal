@@ -1,6 +1,7 @@
 import { ZodError } from "zod";
 
 import { conflict, ok, serverError, validationError } from "@/lib/api/responses";
+import { withIdempotency } from "@/lib/api/idempotency";
 import {
   createReservationSchema,
   parseJsonBody,
@@ -14,6 +15,10 @@ import {
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  return withIdempotency(request, () => createReservationResponse(request));
+}
+
+async function createReservationResponse(request: Request) {
   try {
     const body = await parseJsonBody(request, createReservationSchema);
     const reservation = await createReservation(body);
