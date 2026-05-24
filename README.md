@@ -111,3 +111,6 @@ npm run test:concurrency
 - Improve concurrency by sharding inventory or using optimistic locking with retries.
 - Add authenticated Supabase auth and product/customer identities.
 - Add more full-stack end-to-end tests for the checkout and expiry paths.
+
+## Live App Link
+http://192.168.0.129:3000 
