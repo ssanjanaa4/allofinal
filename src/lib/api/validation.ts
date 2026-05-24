@@ -16,6 +16,14 @@ export const warehousesQuerySchema = z.object({
   productId: z.string().cuid().optional(),
 });
 
+export const createReservationSchema = z.object({
+  productId: z.string().cuid(),
+  warehouseId: z.string().cuid(),
+  quantity: z.number().int().positive().max(10000),
+  idempotencyKey: z.string().trim().min(8).max(128).optional(),
+  expiresAt: z.coerce.date().optional(),
+});
+
 export function parseSearchParams<TSchema extends z.ZodType>(
   request: Request,
   schema: TSchema,
@@ -23,4 +31,13 @@ export function parseSearchParams<TSchema extends z.ZodType>(
   const params = Object.fromEntries(new URL(request.url).searchParams);
 
   return schema.parse(params);
+}
+
+export async function parseJsonBody<TSchema extends z.ZodType>(
+  request: Request,
+  schema: TSchema,
+): Promise<z.infer<TSchema>> {
+  const body = (await request.json()) as unknown;
+
+  return schema.parse(body);
 }

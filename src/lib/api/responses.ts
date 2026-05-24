@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 
 type ApiErrorCode =
   | "BAD_REQUEST"
+  | "CONFLICT"
   | "INTERNAL_SERVER_ERROR"
   | "VALIDATION_ERROR";
 
@@ -52,6 +53,10 @@ export function validationError(error: ZodError) {
     400,
     error.flatten(),
   );
+}
+
+export function conflict(message: string, details?: unknown) {
+  return fail("CONFLICT", message, 409, details);
 }
 
 export function serverError(error: unknown) {
