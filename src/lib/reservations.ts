@@ -73,6 +73,10 @@ const reservationInclude = {
 } satisfies Prisma.ReservationInclude;
 
 export async function createReservation(input: CreateReservationInput) {
+  if (input.quantity <= 0) {
+    throw new Error("Reservation quantity must be greater than zero.");
+  }
+
   return prisma.$transaction(
     async (tx) => {
       if (input.idempotencyKey) {
@@ -127,10 +131,18 @@ export async function createReservation(input: CreateReservationInput) {
         throw new InsufficientStockError(0, input.quantity);
       }
 
+      if (inventory.totalStock < 0 || inventory.reservedStock < 0) {
+        throw new Error("Inventory counters are invalid.");
+      }
+
       const availableStock = getAvailableStock(
         inventory.totalStock,
         inventory.reservedStock,
       );
+
+      if (availableStock < 0) {
+        throw new Error("Inventory reservedStock exceeds totalStock.");
+      }
 
       if (availableStock < input.quantity) {
         throw new InsufficientStockError(availableStock, input.quantity);
@@ -179,6 +191,9 @@ async function lockReservationAndInventory(
    * We lock the Reservation row first, then its Inventory row. Every state
    * transition uses this same order, so concurrent confirm/release requests do
    * not deadlock by taking locks in opposite directions.
+   *
+   * A consistent lock order is a key part of transaction safety when multiple
+   * rows may be modified across a reservation lifecycle.
    */
   const reservationRows = await tx.$queryRaw<LockedReservationRow[]>(Prisma.sql`
     SELECT id, "inventoryId", quantity, status, "expiresAt"
@@ -351,6 +366,9 @@ export async function confirmReservation(reservationId: string) {
        * and Inventory are locked in this transaction, no release request can
        * simultaneously decrement reservedStock while this update decrements
        * both reservedStock and totalStock.
+       *
+       * Returning the existing reservation when already CONFIRMED makes
+       * confirm requests idempotent and safe for retries.
        */
       await tx.inventory.update({
         where: { id: reservation.inventoryId },
@@ -411,6 +429,9 @@ export async function releaseReservation(reservationId: string) {
        * Releasing twice cannot corrupt inventory: only PENDING reservations
        * reach this decrement. Once the status becomes CANCELLED, later release
        * calls return the existing reservation without touching reservedStock.
+       *
+       * This path preserves the inventory invariant by only decrementing
+       * reservedStock when the reservation is still in a held state.
        */
       await tx.inventory.update({
         where: { id: reservation.inventoryId },
