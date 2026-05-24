@@ -4,7 +4,9 @@ import { ZodError } from "zod";
 type ApiErrorCode =
   | "BAD_REQUEST"
   | "CONFLICT"
+  | "GONE"
   | "INTERNAL_SERVER_ERROR"
+  | "NOT_FOUND"
   | "VALIDATION_ERROR";
 
 type ApiSuccess<TData, TMeta = Record<string, never>> = {
@@ -57,6 +59,14 @@ export function validationError(error: ZodError) {
 
 export function conflict(message: string, details?: unknown) {
   return fail("CONFLICT", message, 409, details);
+}
+
+export function gone(message: string, details?: unknown) {
+  return fail("GONE", message, 410, details);
+}
+
+export function notFound(message: string, details?: unknown) {
+  return fail("NOT_FOUND", message, 404, details);
 }
 
 export function serverError(error: unknown) {

@@ -13,6 +13,31 @@ export class InsufficientStockError extends Error {
   }
 }
 
+export class ReservationNotFoundError extends Error {
+  constructor(readonly reservationId: string) {
+    super("Reservation not found.");
+    this.name = "ReservationNotFoundError";
+  }
+}
+
+export class ReservationExpiredError extends Error {
+  constructor(readonly reservationId: string) {
+    super("Reservation has expired.");
+    this.name = "ReservationExpiredError";
+  }
+}
+
+export class ReservationStateError extends Error {
+  constructor(
+    readonly reservationId: string,
+    readonly currentStatus: ReservationStatus,
+    readonly action: "confirm" | "release",
+  ) {
+    super("Reservation is not in a valid state for this transition.");
+    this.name = "ReservationStateError";
+  }
+}
+
 export type CreateReservationInput = {
   productId: string;
   warehouseId: string;
@@ -21,17 +46,33 @@ export type CreateReservationInput = {
   expiresAt?: Date | undefined;
 };
 
+type LockedReservationRow = {
+  id: string;
+  inventoryId: string;
+  quantity: number;
+  status: ReservationStatus;
+  expiresAt: Date | null;
+};
+
+type LockedInventoryRow = {
+  id: string;
+  totalStock: number;
+  reservedStock: number;
+};
+
+const reservationInclude = {
+  product: true,
+  warehouse: true,
+  inventory: true,
+} satisfies Prisma.ReservationInclude;
+
 export async function createReservation(input: CreateReservationInput) {
   return prisma.$transaction(
     async (tx) => {
       if (input.idempotencyKey) {
         const existingReservation = await tx.reservation.findUnique({
           where: { idempotencyKey: input.idempotencyKey },
-          include: {
-            product: true,
-            warehouse: true,
-            inventory: true,
-          },
+          include: reservationInclude,
         });
 
         if (existingReservation) {
@@ -111,11 +152,7 @@ export async function createReservation(input: CreateReservationInput) {
             ? { idempotencyKey: input.idempotencyKey }
             : {}),
         },
-        include: {
-          product: true,
-          warehouse: true,
-          inventory: true,
-        },
+        include: reservationInclude,
       });
     },
     {
@@ -127,6 +164,199 @@ export async function createReservation(input: CreateReservationInput) {
 }
 
 export type ReservationResult = Awaited<ReturnType<typeof createReservation>>;
+
+async function lockReservationAndInventory(
+  tx: Prisma.TransactionClient,
+  reservationId: string,
+) {
+  /*
+   * We lock the Reservation row first, then its Inventory row. Every state
+   * transition uses this same order, so concurrent confirm/release requests do
+   * not deadlock by taking locks in opposite directions.
+   */
+  const reservationRows = await tx.$queryRaw<LockedReservationRow[]>(Prisma.sql`
+    SELECT id, "inventoryId", quantity, status, "expiresAt"
+    FROM "Reservation"
+    WHERE id = ${reservationId}
+    FOR UPDATE
+  `);
+
+  const reservation = reservationRows[0];
+
+  if (!reservation) {
+    throw new ReservationNotFoundError(reservationId);
+  }
+
+  const inventoryRows = await tx.$queryRaw<LockedInventoryRow[]>(Prisma.sql`
+    SELECT id, "totalStock", "reservedStock"
+    FROM "Inventory"
+    WHERE id = ${reservation.inventoryId}
+    FOR UPDATE
+  `);
+
+  const inventory = inventoryRows[0];
+
+  if (!inventory) {
+    throw new ReservationNotFoundError(reservationId);
+  }
+
+  return { reservation, inventory };
+}
+
+async function fetchReservation(
+  tx: Prisma.TransactionClient,
+  reservationId: string,
+) {
+  return tx.reservation.findUniqueOrThrow({
+    where: { id: reservationId },
+    include: reservationInclude,
+  });
+}
+
+function isExpired(expiresAt: Date | null) {
+  return Boolean(expiresAt && expiresAt.getTime() <= Date.now());
+}
+
+async function expirePendingReservation(
+  tx: Prisma.TransactionClient,
+  reservation: LockedReservationRow,
+) {
+  /*
+   * Expiration cleanup is still transactional. The same locked reservation row
+   * guards this block, so only one request can subtract the held quantity from
+   * reservedStock and mark the reservation EXPIRED.
+   */
+  if (reservation.status === ReservationStatus.PENDING) {
+    await tx.inventory.update({
+      where: { id: reservation.inventoryId },
+      data: {
+        reservedStock: {
+          decrement: reservation.quantity,
+        },
+      },
+    });
+
+    await tx.reservation.update({
+      where: { id: reservation.id },
+      data: { status: ReservationStatus.EXPIRED },
+    });
+  }
+}
+
+export async function confirmReservation(reservationId: string) {
+  return prisma.$transaction(
+    async (tx) => {
+      const { reservation } = await lockReservationAndInventory(
+        tx,
+        reservationId,
+      );
+
+      if (isExpired(reservation.expiresAt)) {
+        await expirePendingReservation(tx, reservation);
+        throw new ReservationExpiredError(reservationId);
+      }
+
+      if (reservation.status === ReservationStatus.CONFIRMED) {
+        return fetchReservation(tx, reservationId);
+      }
+
+      if (reservation.status !== ReservationStatus.PENDING) {
+        throw new ReservationStateError(
+          reservationId,
+          reservation.status,
+          "confirm",
+        );
+      }
+
+      /*
+       * Confirm permanently consumes the held units. Because both Reservation
+       * and Inventory are locked in this transaction, no release request can
+       * simultaneously decrement reservedStock while this update decrements
+       * both reservedStock and totalStock.
+       */
+      await tx.inventory.update({
+        where: { id: reservation.inventoryId },
+        data: {
+          totalStock: {
+            decrement: reservation.quantity,
+          },
+          reservedStock: {
+            decrement: reservation.quantity,
+          },
+        },
+      });
+
+      await tx.reservation.update({
+        where: { id: reservation.id },
+        data: { status: ReservationStatus.CONFIRMED },
+      });
+
+      return fetchReservation(tx, reservationId);
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      maxWait: 5000,
+      timeout: 10000,
+    },
+  );
+}
+
+export async function releaseReservation(reservationId: string) {
+  return prisma.$transaction(
+    async (tx) => {
+      const { reservation } = await lockReservationAndInventory(
+        tx,
+        reservationId,
+      );
+
+      if (isExpired(reservation.expiresAt)) {
+        await expirePendingReservation(tx, reservation);
+        throw new ReservationExpiredError(reservationId);
+      }
+
+      if (
+        reservation.status === ReservationStatus.CANCELLED ||
+        reservation.status === ReservationStatus.EXPIRED
+      ) {
+        return fetchReservation(tx, reservationId);
+      }
+
+      if (reservation.status === ReservationStatus.CONFIRMED) {
+        throw new ReservationStateError(
+          reservationId,
+          reservation.status,
+          "release",
+        );
+      }
+
+      /*
+       * Releasing twice cannot corrupt inventory: only PENDING reservations
+       * reach this decrement. Once the status becomes CANCELLED, later release
+       * calls return the existing reservation without touching reservedStock.
+       */
+      await tx.inventory.update({
+        where: { id: reservation.inventoryId },
+        data: {
+          reservedStock: {
+            decrement: reservation.quantity,
+          },
+        },
+      });
+
+      await tx.reservation.update({
+        where: { id: reservation.id },
+        data: { status: ReservationStatus.CANCELLED },
+      });
+
+      return fetchReservation(tx, reservationId);
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+      maxWait: 5000,
+      timeout: 10000,
+    },
+  );
+}
 
 export function serializeReservation(reservation: ReservationResult) {
   const availableStock = getAvailableStock(
