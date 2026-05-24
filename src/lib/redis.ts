@@ -1,4 +1,5 @@
 import { Redis } from "@upstash/redis";
+import { env } from "@/lib/env";
 
 let redis: Redis | undefined;
 
@@ -7,8 +8,8 @@ export function getRedis() {
     return redis;
   }
 
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const url = env.UPSTASH_REDIS_REST_URL;
+  const token = env.UPSTASH_REDIS_REST_TOKEN;
 
   if (!url || !token) {
     throw new Error("Upstash Redis environment variables are not configured.");

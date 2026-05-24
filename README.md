@@ -1,43 +1,111 @@
 # Allofinal Inventory Reservations
 
-Production-grade Next.js 15 App Router service for inventory lookup and stock reservations.
+A production-ready Next.js 15 App Router application for inventory management and stock reservation.
 
-## Commands
+## Architecture Overview
+
+- **Frontend:** Next.js App Router serving server components and API routes.
+- **Database:** PostgreSQL via Prisma; compatible with Supabase Postgres.
+- **Cache / Idempotency:** Upstash Redis for request locks and response caching.
+- **Deployment:** Vercel with scheduled cron route for expired reservations.
+- **Inventory model:** `Inventory.totalStock`, `Inventory.reservedStock`, `Reservation.status`.
+
+## Concurrency and Locking Strategy
+
+### Reservation creation
+
+- `createReservation` runs inside a single Prisma transaction.
+- It uses `SELECT ... FOR UPDATE` to lock the matching `Inventory` row.
+- Available stock is computed as `totalStock - reservedStock` before incrementing `reservedStock`.
+- Concurrent reservation attempts on the same inventory row serialize at the row lock and cannot oversell.
+
+### Confirm / Release transitions
+
+- `confirmReservation` and `releaseReservation` both lock:
+  1. the `Reservation` row
+  2. then the associated `Inventory` row
+- This consistent lock order avoids deadlocks across concurrent state transitions.
+- Confirming decrements both `totalStock` and `reservedStock` in one transaction.
+- Releasing decrements only `reservedStock` and marks the reservation `CANCELLED`.
+
+## Expiry Mechanism
+
+- Reservations can include an `expiresAt` timestamp.
+- The cron route at `/api/cron/expire-reservations` runs every 5 minutes via `vercel.json`.
+- `cleanupExpiredReservations` selects expired `PENDING` reservations with `FOR UPDATE SKIP LOCKED`.
+- Each expired reservation is marked `EXPIRED` and its reserved stock is returned to inventory atomically.
+- Confirm and release routes also perform lazy expiry when they touch stale reservations.
+
+## Idempotency Strategy
+
+- API POST routes require an `Idempotency-Key` header.
+- `withIdempotency` uses Upstash Redis to:
+  - lock an in-flight request with a short TTL
+  - cache the response for 24 hours
+  - return the cached response on retries
+- `createReservation` also supports a stable `idempotencyKey` at the reservation level so retries do not create duplicate reservations.
+
+## Environment Variables
+
+Required variables for production and local development:
+
+- `DATABASE_URL` – Postgres connection string for Prisma.
+- `DIRECT_URL` – optional direct database URL for immutable deployments or preview environments.
+- `NEXT_PUBLIC_SUPABASE_URL` – public Supabase project URL.
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY` – Supabase anonymous API key.
+- `UPSTASH_REDIS_REST_URL` – Upstash Redis REST endpoint.
+- `UPSTASH_REDIS_REST_TOKEN` – Upstash Redis REST token.
+- `CRON_SECRET` – bearer token used by Vercel cron requests in production.
+
+Create a `.env.local` from `.env.example` and keep secrets out of version control.
+
+## Local Setup
 
 ```bash
-npm run dev
-npm run build
-npm run lint
-npm run typecheck
+git clone <repo-url>
+cd allofinal
+npm install
+cp .env.example .env.local
+# fill in real env values
+npm run prisma:generate
 npm run prisma:migrate
 npm run prisma:seed
+npm run dev
 ```
 
-## Reservation Expiry Cleanup
+### Recommended development checks
 
-Reservations hold stock by incrementing `Inventory.reservedStock`. A reservation is available until `expiresAt`; once expired, it must release that held quantity exactly once.
-
-This app uses the best practical Vercel approach:
-
-- `vercel.json` schedules `/api/cron/expire-reservations` every 5 minutes.
-- The cron route calls `cleanupExpiredReservations`.
-- Cleanup selects pending expired rows with `SELECT ... FOR UPDATE SKIP LOCKED`.
-- Each selected row is marked `EXPIRED` and its quantity is decremented from `reservedStock` in the same transaction.
-- `SKIP LOCKED` makes the cleanup horizontally scalable: overlapping cron invocations or future workers skip rows already being processed.
-- Confirm/release flows also perform lazy expiry for the reservation they touch, so stale holds are cleaned even between cron runs.
-
-Set `CRON_SECRET` in production. Vercel should call the cron endpoint with:
-
-```http
-Authorization: Bearer <CRON_SECRET>
+```bash
+npm run lint
+npm run typecheck
+npm run test:concurrency
 ```
 
-Without `CRON_SECRET`, the cron route only allows unauthenticated access outside production.
+## Migrations and Seeding
 
-## Stock Formula
+- `npm run prisma:migrate` applies migrations to the connected database.
+- `npm run prisma:seed` populates demo or initial data.
+- `npm run prisma:generate` creates the Prisma client; this also runs automatically after install via `postinstall`.
 
-```txt
-availableStock = totalStock - reservedStock
-```
+## Vercel Deployment
 
-Confirming a reservation decrements both `totalStock` and `reservedStock`. Releasing or expiring a reservation decrements only `reservedStock`.
+1. Connect the GitHub repository to Vercel.
+2. Add required environment variables to the Vercel project settings.
+3. Ensure `vercel.json` is included in the repository so the cron route is scheduled.
+4. Deploy the project; Vercel will run `npm run build`.
+5. Confirm the deployed app responds and the cron route is accessible with `Authorization: Bearer <CRON_SECRET>`.
+
+## Tradeoffs
+
+- **Pros:** row-level database locking is simple, reliable, and prevents overselling.
+- **Cons:** high contention on hot inventory rows may serialize requests.
+- **Redis idempotency:** protects retry storms but adds an external dependency.
+- **Expiry model:** relies on a scheduled cleanup and lazy expiry checks, so short-lived holds may persist until the next cron or API touch.
+
+## Future Improvements
+
+- Add a dedicated worker queue or database trigger for reservation expiry.
+- Add inventory ledger / audit events for every stock transition.
+- Improve concurrency by sharding inventory or using optimistic locking with retries.
+- Add authenticated Supabase auth and product/customer identities.
+- Add more full-stack end-to-end tests for the checkout and expiry paths.
