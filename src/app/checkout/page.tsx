@@ -1,10 +1,10 @@
-import { ProductListing } from "@/components/product-listing";
+import { Checkout } from "@/components/checkout";
 import { ToastProvider } from "@/components/toast-provider";
 
-export default function Home() {
+export default function CheckoutPage() {
   return (
     <ToastProvider>
-      <ProductListing />
+      <Checkout />
     </ToastProvider>
   );
 }
