@@ -95,6 +95,8 @@ npm run test:concurrency
 4. Deploy the project; Vercel will run `npm run build`.
 5. Confirm the deployed app responds and the cron route is accessible with `Authorization: Bearer <CRON_SECRET>`.
 
+> Note: Vercel hobby accounts only allow daily cron execution. The default `*/5 * * * *` schedule requires a Pro plan or an external scheduler for production-grade expiry cadence.
+
 ## Tradeoffs
 
 - **Pros:** row-level database locking is simple, reliable, and prevents overselling.
